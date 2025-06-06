@@ -14,7 +14,7 @@ VIDEO_CONFIG_DIRECTORY=${VIDEO_CONFIG_DIRECTORY:-"/opt/bin"}
 UPLOAD_DESTINATION_PREFIX=${UPLOAD_DESTINATION_PREFIX:-$SE_UPLOAD_DESTINATION_PREFIX}
 UPLOAD_PIPE_FILE_NAME=${SE_UPLOAD_PIPE_FILE_NAME:-"uploadpipe"}
 SE_SERVER_PROTOCOL=${SE_SERVER_PROTOCOL:-"http"}
-poll_interval=${SE_VIDEO_POLL_INTERVAL:-2}
+poll_interval=${SE_VIDEO_POLL_INTERVAL:-1}
 max_attempts=${SE_VIDEO_WAIT_ATTEMPTS:-50}
 file_ready_max_attempts=${SE_VIDEO_FILE_READY_WAIT_ATTEMPTS:-5}
 wait_uploader_shutdown_max_attempts=${SE_VIDEO_WAIT_UPLOADER_SHUTDOWN_ATTEMPTS:-5}
@@ -235,8 +235,11 @@ if [[ "${VIDEO_UPLOAD_ENABLED}" != "true" ]] && [[ "${VIDEO_FILE_NAME}" != "auto
   wait_for_display
   video_file="$VIDEO_FOLDER/$VIDEO_FILE_NAME"
   # exec replaces the video.sh process with ffmpeg, this makes easier to pass the process termination signal
-  nice -n 10 ffmpeg -hide_banner -loglevel warning -threads ${SE_FFMPEG_THREADS:-4} -y -f x11grab \
-    -video_size ${VIDEO_SIZE} -r ${FRAME_RATE} -i ${DISPLAY} ${SE_AUDIO_SOURCE} -codec:v ${CODEC} ${PRESET} -pix_fmt yuv420p "$video_file" &
+  ffmpeg -hide_banner -loglevel warning -threads ${SE_FFMPEG_THREADS:-2} -thread_queue_size 512 \
+    -probesize 32M -analyzeduration 0 -y -f x11grab -video_size ${VIDEO_SIZE} -r ${FRAME_RATE} \
+    -i ${DISPLAY} ${SE_AUDIO_SOURCE} -codec:v ${CODEC} ${PRESET:-"-preset veryfast"} \
+    -tune zerolatency -crf ${SE_VIDEO_CRF:-28} -maxrate ${SE_VIDEO_MAXRATE:-1000k} -bufsize ${SE_VIDEO_BUFSIZE:-2000k} \
+    -pix_fmt yuv420p -movflags +faststart "$video_file" &
   FFMPEG_PID=$!
   if ps -p $FFMPEG_PID >/dev/null; then
     wait $FFMPEG_PID
@@ -272,8 +275,11 @@ else
         log_node_response
         video_file="${VIDEO_FOLDER}/$video_file_name"
         echo "$(date -u +"${ts_format}") [${process_name}] - Starting to record video"
-        nice -n 10 ffmpeg -hide_banner -loglevel warning -threads ${SE_FFMPEG_THREADS:-4} -y -f x11grab \
-          -video_size ${VIDEO_SIZE} -r ${FRAME_RATE} -i ${DISPLAY} ${SE_AUDIO_SOURCE} -codec:v ${CODEC} ${PRESET} -pix_fmt yuv420p "$video_file" &
+        ffmpeg -hide_banner -loglevel warning -threads ${SE_FFMPEG_THREADS:-2} -thread_queue_size 512 \
+          -probesize 32M -analyzeduration 0 -y -f x11grab -video_size ${VIDEO_SIZE} -r ${FRAME_RATE} \
+          -i ${DISPLAY} ${SE_AUDIO_SOURCE} -codec:v ${CODEC} ${PRESET:-"-preset veryfast"} \
+          -tune zerolatency -crf ${SE_VIDEO_CRF:-28} -maxrate ${SE_VIDEO_MAXRATE:-1000k} -bufsize ${SE_VIDEO_BUFSIZE:-2000k} \
+          -pix_fmt yuv420p -movflags +faststart "$video_file" &
         FFMPEG_PID=$!
         if ps -p $FFMPEG_PID >/dev/null; then
           recording_started="true"
