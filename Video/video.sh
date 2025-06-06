@@ -14,7 +14,7 @@ VIDEO_CONFIG_DIRECTORY=${VIDEO_CONFIG_DIRECTORY:-"/opt/bin"}
 UPLOAD_DESTINATION_PREFIX=${UPLOAD_DESTINATION_PREFIX:-$SE_UPLOAD_DESTINATION_PREFIX}
 UPLOAD_PIPE_FILE_NAME=${SE_UPLOAD_PIPE_FILE_NAME:-"uploadpipe"}
 SE_SERVER_PROTOCOL=${SE_SERVER_PROTOCOL:-"http"}
-poll_interval=${SE_VIDEO_POLL_INTERVAL:-1}
+poll_interval=${SE_VIDEO_POLL_INTERVAL:-2}
 max_attempts=${SE_VIDEO_WAIT_ATTEMPTS:-50}
 file_ready_max_attempts=${SE_VIDEO_FILE_READY_WAIT_ATTEMPTS:-5}
 wait_uploader_shutdown_max_attempts=${SE_VIDEO_WAIT_UPLOADER_SHUTDOWN_ATTEMPTS:-5}
@@ -141,17 +141,23 @@ function exit_on_max_session_reach() {
 }
 
 function stop_ffmpeg() {
-  while true; do
-    FFMPEG_PID=$(pgrep -f "ffmpeg -hide_banner" | tr '\n' ' ')
-    if [ -n "$FFMPEG_PID" ]; then
-      kill -SIGTERM $FFMPEG_PID
-      wait $FFMPEG_PID
+  local max_wait=10
+  local wait_count=0
+  
+  FFMPEG_PID=$(pgrep -f "ffmpeg -hide_banner" | tr '\n' ' ')
+  if [ -n "$FFMPEG_PID" ]; then
+    kill -SIGTERM $FFMPEG_PID
+    
+    while [ $wait_count -lt $max_wait ] && pgrep -f "ffmpeg -hide_banner" >/dev/null; do
+      sleep 0.5
+      wait_count=$((wait_count + 1))
+    done
+    
+    if pgrep -f "ffmpeg -hide_banner" >/dev/null; then
+      echo "$(date -u +"${ts_format}") [${process_name}] - Force killing ffmpeg after ${max_wait} attempts"
+      kill -SIGKILL $(pgrep -f "ffmpeg -hide_banner") 2>/dev/null || true
     fi
-    if ! pgrep -f "ffmpeg -hide_banner" >/dev/null; then
-      break
-    fi
-    sleep ${poll_interval}
-  done
+  fi
 }
 
 function stop_recording() {
@@ -229,7 +235,7 @@ if [[ "${VIDEO_UPLOAD_ENABLED}" != "true" ]] && [[ "${VIDEO_FILE_NAME}" != "auto
   wait_for_display
   video_file="$VIDEO_FOLDER/$VIDEO_FILE_NAME"
   # exec replaces the video.sh process with ffmpeg, this makes easier to pass the process termination signal
-  ffmpeg -hide_banner -loglevel warning -flags low_delay -threads 2 -fflags nobuffer+genpts -strict experimental -y -f x11grab \
+  nice -n 10 ffmpeg -hide_banner -loglevel warning -threads ${SE_FFMPEG_THREADS:-4} -y -f x11grab \
     -video_size ${VIDEO_SIZE} -r ${FRAME_RATE} -i ${DISPLAY} ${SE_AUDIO_SOURCE} -codec:v ${CODEC} ${PRESET} -pix_fmt yuv420p "$video_file" &
   FFMPEG_PID=$!
   if ps -p $FFMPEG_PID >/dev/null; then
@@ -249,7 +255,11 @@ else
   recorded_count=0
 
   wait_for_api_respond
+  consecutive_failures=0
+  max_consecutive_failures=3
+  
   while curl --noproxy "*" -H "${BASIC_AUTH}" -sk --request GET ${NODE_STATUS_ENDPOINT} >"/tmp/status.json"; do
+    consecutive_failures=0
     session_id="$(jq -r "${JQ_SESSION_ID_QUERY}" "/tmp/status.json")"
     if [[ "$session_id" != "null" && "$session_id" != "" && "$session_id" != "reserved" && "$recording_started" = "false" ]]; then
       echo "$(date -u +"${ts_format}") [${process_name}] - Session: $session_id is created"
@@ -262,7 +272,7 @@ else
         log_node_response
         video_file="${VIDEO_FOLDER}/$video_file_name"
         echo "$(date -u +"${ts_format}") [${process_name}] - Starting to record video"
-        ffmpeg -hide_banner -loglevel warning -flags low_delay -threads 2 -fflags nobuffer+genpts -strict experimental -y -f x11grab \
+        nice -n 10 ffmpeg -hide_banner -loglevel warning -threads ${SE_FFMPEG_THREADS:-4} -y -f x11grab \
           -video_size ${VIDEO_SIZE} -r ${FRAME_RATE} -i ${DISPLAY} ${SE_AUDIO_SOURCE} -codec:v ${CODEC} ${PRESET} -pix_fmt yuv420p "$video_file" &
         FFMPEG_PID=$!
         if ps -p $FFMPEG_PID >/dev/null; then
@@ -281,8 +291,15 @@ else
     elif [[ $recording_started = "true" ]]; then
       echo "$(date -u +"${ts_format}") [${process_name}] - Video recording in progress"
       sleep ${poll_interval}
+    else
+      sleep $((poll_interval * 2))
     fi
   done
+  
+  consecutive_failures=$((consecutive_failures + 1))
+  if [[ $consecutive_failures -ge $max_consecutive_failures ]]; then
+    echo "$(date -u +"${ts_format}") [${process_name}] - API endpoint failed $consecutive_failures times, exiting..."
+  fi
   stop_if_recording_inprogress
   echo "$(date -u +"${ts_format}") [${process_name}] - Node API is not responding now, exiting..."
   echo "$(date -u +"${ts_format}") [${process_name}] - Noted: Set container restart policy to spin up process again for recording another session might come up"
